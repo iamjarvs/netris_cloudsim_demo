@@ -217,32 +217,24 @@ def patch_repo_templates(dest_dir, site_name, leaf_asn_start, spine_asn_start, b
         # Unique BGP session names, IPs and VLANs
         for i in range(1, 5):
             cfg = bgp_configs[i - 1]
-            # Replace session name in netris_bgp block
-            pattern_bgp = r'(resource\s+"netris_bgp"\s+"upstream' + str(i) + r'"\s*\{\s*\n\s*name\s*=\s*")[^"]+(")'
-            patched = re.sub(
-                pattern_bgp,
-                rf'\g<1>{pfx}-upstream{i}\g<2>',
-                patched
+            block_pattern = (
+                rf'(resource\s+"netris_bgp"\s+"upstream{i}"\s*\{{[^}}]*?'
+                rf'name\s*=\s*")[^"]+(".*?'
+                rf'vlanid\s*=\s*)\d+(.*?'
+                rf'localip\s*=\s*")[^"]+(".*?'
+                rf'remoteip\s*=\s*")[^"]+(")'
             )
-            # Replace localip and remoteip
+            def make_repl(pfx_val, i_val, cfg_val):
+                return (
+                    rf'\g<1>{pfx_val}-upstream{i_val}\g<2>{cfg_val["vlan"]}'
+                    rf'\g<3>{cfg_val["local"]}\g<4>{cfg_val["remote"]}\g<5>'
+                )
+
             patched = re.sub(
-                r'localip\s*=\s*"10\.10\.0\.\d+/30"',
-                f'localip                         = "{cfg["local"]}"',
+                block_pattern,
+                make_repl(pfx, i, cfg),
                 patched,
-                count=1
-            )
-            patched = re.sub(
-                r'remoteip\s*=\s*"10\.10\.0\.\d+/30"',
-                f'remoteip                        = "{cfg["remote"]}"',
-                patched,
-                count=1
-            )
-            # Replace vlanid
-            patched = re.sub(
-                r'vlanid\s*=\s*\d+',
-                f'vlanid                          = {cfg["vlan"]}',
-                patched,
-                count=1
+                flags=re.DOTALL
             )
 
         with open(bgp_file, "w") as f:
