@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Netris Spectrum-X CloudSim Demo Fabric Deployer
-Dynamically inspects the Netris Controller, resolves non-conflicting IPAM/ASNs,
+Dynamically inspects the Netris Controller, resolves non-conflicting IPAM/ASNs/BGP/Hardware,
 creates an isolated data centre workspace, writes standard terraform.tfvars,
 and automatically initialises and plans OpenTofu/Terraform.
 """
@@ -81,10 +81,49 @@ def find_free_allocation(existing_allocs, supernet_str, prefix_len):
     raise RuntimeError(f"Exhausted pool inside {supernet_str} for /{prefix_len}")
 
 
-def patch_repo_templates(dest_dir, site_name, leaf_asn_start, spine_asn_start):
+def calculate_free_bgp_sessions(bgp_list, count=4):
     """
-    Ensures unique hardware, switch, profile, and template names across data centres.
-    In Netris, all Hardware names are globally unique across the entire controller.
+    Finds non-conflicting local/remote IP pairs and VLAN IDs for external BGP sessions.
+    """
+    used_vlans = {b.get("vlan") for b in bgp_list if b.get("vlan")}
+    used_ips = set()
+    for b in bgp_list:
+        if b.get("localIP"):
+            used_ips.add(ipaddress.ip_network(f"{b['localIP']}/30", strict=False))
+        if b.get("remoteIP"):
+            used_ips.add(ipaddress.ip_network(f"{b['remoteIP']}/30", strict=False))
+
+    pool = ipaddress.ip_network("10.10.0.0/16")
+    results = []
+
+    # Assign non-colliding VLANs starting from 10
+    vlan_cur = 10
+    vlan_list = []
+    while len(vlan_list) < count:
+        if vlan_cur not in used_vlans:
+            vlan_list.append(vlan_cur)
+            used_vlans.add(vlan_cur)
+        vlan_cur += 1
+
+    # Assign non-colliding /30 subnets
+    for cand in pool.subnets(new_prefix=30):
+        if not any(cand.overlaps(u) for u in used_ips):
+            hosts = list(cand.hosts())
+            results.append({
+                "local": f"{hosts[0]}/30",
+                "remote": f"{hosts[1]}/30",
+                "vlan": vlan_list[len(results)]
+            })
+            used_ips.add(cand)
+            if len(results) == count:
+                break
+    return results
+
+
+def patch_repo_templates(dest_dir, site_name, leaf_asn_start, spine_asn_start, bgp_configs):
+    """
+    Ensures unique hardware, switch, profile, template, and BGP session names across data centres.
+    In Netris, Hardware, BGP sessions, and Profiles must have globally unique names.
     """
     pfx = site_name.lower()
 
@@ -174,6 +213,37 @@ def patch_repo_templates(dest_dir, site_name, leaf_asn_start, spine_asn_start):
         patched = re.sub(r'swp51s(\d+)@ns-leaf-0', rf'swp51s\1@{pfx}-ns-leaf-0', patched)
         # SoftGate hardware reference
         patched = re.sub(r'hardware\s*=\s*"ns-softgate-(\d+)"', rf'hardware                        = "{pfx}-ns-softgate-\1"', patched)
+
+        # Unique BGP session names, IPs and VLANs
+        for i in range(1, 5):
+            cfg = bgp_configs[i - 1]
+            # Replace resource name and session name
+            patched = re.sub(
+                rf'resource "netris_bgp" "upstream{i}" \{\s*\n\s*name\s*=\s*"[^"]+"',
+                f'resource "netris_bgp" "upstream{i}" {{\n  name                            = "{pfx}-upstream{i}"',
+                patched
+            )
+            # Replace localip and remoteip
+            patched = re.sub(
+                rf'localip\s*=\s*"10\.10\.0\.\d+/30"',
+                f'localip                         = "{cfg["local"]}"',
+                patched,
+                count=1
+            )
+            patched = re.sub(
+                rf'remoteip\s*=\s*"10\.10\.0\.\d+/30"',
+                f'remoteip                        = "{cfg["remote"]}"',
+                patched,
+                count=1
+            )
+            # Replace vlanid
+            patched = re.sub(
+                rf'vlanid\s*=\s*\d+',
+                f'vlanid                          = {cfg["vlan"]}',
+                patched,
+                count=1
+            )
+
         with open(bgp_file, "w") as f:
             f.write(patched)
 
@@ -243,6 +313,9 @@ def main():
     hw_res = api_get(args.url, "/api/v2/hw", cookie).get("data", [])
     used_hw_asns = {h.get("asn") for h in hw_res if h.get("asn")}
 
+    # 5. Fetch existing BGP Sessions
+    bgp_res = api_get(args.url, "/api/v2/ebgp", cookie).get("data", [])
+
     # Calculate collision-free top-level allocations across multiple supernets
     private_alloc = None
     for cand_supernet in ["172.18.0.0/15", "172.20.0.0/14", "172.24.0.0/13"]:
@@ -287,6 +360,9 @@ def main():
     while any((ns_switch_asn + offset) in used_hw_asns for offset in range(300)):
         ns_switch_asn += 1000
 
+    # Calculate non-conflicting BGP sessions
+    bgp_configs = calculate_free_bgp_sessions(bgp_res, count=4)
+
     print(f"\n[+] Resolved Isolated Parameters:")
     print(f"    - Site Name:        {site_name}")
     print(f"    - Site Public ASN:  {site_asn}")
@@ -302,6 +378,7 @@ def main():
     print(f"    - E-W Leaf Start ASN:  {ew_leaf_asn}")
     print(f"    - E-W Spine Start ASN: {ew_spine_asn}")
     print(f"    - N-S Switch Start ASN: {ns_switch_asn}")
+    print(f"    - BGP Peerings:     4 sessions dynamically mapped to non-colliding /30s & VLANs")
 
     tfvars_body = f"""###################################################################################################
 #  Standard terraform.tfvars - Auto-generated for {site_name}
@@ -386,8 +463,8 @@ north-south-fabric = {{
     else:
         print(f"[*] Target directory already exists, refreshing files...")
 
-    # Patch server cluster template, switch names, profile names, and ASN offsets
-    patch_repo_templates(target_dir, site_name, ew_leaf_asn, ew_spine_asn)
+    # Patch server cluster template, switch names, profile names, ASN offsets, and BGP sessions
+    patch_repo_templates(target_dir, site_name, ew_leaf_asn, ew_spine_asn, bgp_configs)
 
     # Standard terraform.tfvars (no -var-file needed)
     tfvars_path = os.path.join(target_dir, "terraform.tfvars")
