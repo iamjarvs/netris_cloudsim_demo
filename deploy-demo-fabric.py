@@ -217,28 +217,29 @@ def patch_repo_templates(dest_dir, site_name, leaf_asn_start, spine_asn_start, b
         # Unique BGP session names, IPs and VLANs
         for i in range(1, 5):
             cfg = bgp_configs[i - 1]
-            # Replace resource name and session name
+            # Replace session name in netris_bgp block
+            pattern_bgp = r'(resource\s+"netris_bgp"\s+"upstream' + str(i) + r'"\s*\{\s*\n\s*name\s*=\s*")[^"]+(")'
             patched = re.sub(
-                rf'resource "netris_bgp" "upstream{i}" \{\s*\n\s*name\s*=\s*"[^"]+"',
-                f'resource "netris_bgp" "upstream{i}" {{\n  name                            = "{pfx}-upstream{i}"',
+                pattern_bgp,
+                rf'\g<1>{pfx}-upstream{i}\g<2>',
                 patched
             )
             # Replace localip and remoteip
             patched = re.sub(
-                rf'localip\s*=\s*"10\.10\.0\.\d+/30"',
+                r'localip\s*=\s*"10\.10\.0\.\d+/30"',
                 f'localip                         = "{cfg["local"]}"',
                 patched,
                 count=1
             )
             patched = re.sub(
-                rf'remoteip\s*=\s*"10\.10\.0\.\d+/30"',
+                r'remoteip\s*=\s*"10\.10\.0\.\d+/30"',
                 f'remoteip                        = "{cfg["remote"]}"',
                 patched,
                 count=1
             )
             # Replace vlanid
             patched = re.sub(
-                rf'vlanid\s*=\s*\d+',
+                r'vlanid\s*=\s*\d+',
                 f'vlanid                          = {cfg["vlan"]}',
                 patched,
                 count=1
