@@ -146,7 +146,7 @@ def patch_repo_templates(dest_dir, site_name, leaf_asn_start, spine_asn_start):
             f'resource "netris_inventory_profile" "inv-profile-north-south" {{\n  count                           = var.north-south-fabric.enable\n  name                            = "{site_name}-North-South"',
             content
         )
-        # Switch names
+        # Switch and SoftGate names
         patched = re.sub(r'name\s*=\s*"ns-leaf-', f'name                            = "{pfx}-ns-leaf-', patched)
         patched = re.sub(r'name\s*=\s*"ns-oob-leaf-', f'name                            = "{pfx}-ns-oob-leaf-', patched)
         patched = re.sub(r'name\s*=\s*"ns-spine-', f'name                            = "{pfx}-ns-spine-', patched)
@@ -243,8 +243,17 @@ def main():
     hw_res = api_get(args.url, "/api/v2/hw", cookie).get("data", [])
     used_hw_asns = {h.get("asn") for h in hw_res if h.get("asn")}
 
-    # Calculate collision-free top-level allocations
-    private_alloc = find_free_allocation(existing_allocs, "172.18.0.0/15", 16)
+    # Calculate collision-free top-level allocations across multiple supernets
+    private_alloc = None
+    for cand_supernet in ["172.18.0.0/15", "172.20.0.0/14", "172.24.0.0/13"]:
+        try:
+            private_alloc = find_free_allocation(existing_allocs, cand_supernet, 16)
+            break
+        except RuntimeError:
+            continue
+    if not private_alloc:
+        raise RuntimeError("Could not find free /16 private allocation block")
+
     nat_alloc = find_free_allocation(existing_allocs, "100.64.0.0/10", 30)
     l4lb_alloc = find_free_allocation(existing_allocs, "100.64.0.0/10", 30)
 
