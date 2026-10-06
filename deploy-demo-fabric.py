@@ -219,12 +219,11 @@ def main():
     nat_alloc = find_free_allocation(existing_allocs, "100.64.0.0/10", 30)
     l4lb_alloc = find_free_allocation(existing_allocs, "100.64.0.0/10", 30)
 
-    # Calculate subnets inside private_alloc
-    # Subnets inside private_alloc:
+    # Calculate subnets inside private_alloc:
     oob_mgmt = find_free_subnet(existing_subnets, str(private_alloc), 18)
     switch_lo = find_free_subnet(existing_subnets, str(private_alloc), 24)
 
-    # North-South subnets (can be /16 from 10.0.0.0/8 or remaining space)
+    # North-South subnets (/16 from 10.0.0.0/8)
     ns_lo = find_free_subnet(existing_subnets, "10.0.0.0/8", 16)
     ns_mgmt = find_free_subnet(existing_subnets, "10.0.0.0/8", 16)
 
@@ -352,10 +351,14 @@ north-south-fabric = {{
     with open(demo_vars_path, "w") as f:
         f.write(tfvars_body)
 
-    # Clear terraform.auto.tfvars so it doesn't override our dynamic pnap_ipam_public
+    # Clear terraform.auto.tfvars so it doesn't override dynamic public pools
     auto_vars_path = os.path.join(target_dir, "terraform.auto.tfvars")
     if os.path.exists(auto_vars_path):
         os.remove(auto_vars_path)
+
+    # Record target_dir for run-demo.sh wrapper
+    with open(os.path.join(script_dir, ".last_deploy_dir"), "w") as f:
+        f.write(target_dir)
 
     print(f"[✓] Written standard variable file: {tfvars_path}")
     print(f"[✓] Written demo-AI-fabric.tfvars:   {demo_vars_path}")
@@ -364,8 +367,7 @@ north-south-fabric = {{
     if not args.no_tofu:
         bin_path = find_binary()
         print(f"\n" + "=" * 70)
-        print(f"[*] Switching directory to: {target_dir}")
-        print(f"[*] Executing: {bin_path} init")
+        print(f"[*] Executing in {target_dir}: {bin_path} init")
         print("=" * 70 + "\n")
         
         ret = subprocess.call([bin_path, "init"], cwd=target_dir)
@@ -375,7 +377,7 @@ north-south-fabric = {{
 
         tofu_cmd = [bin_path, "apply", "-auto-approve"] if args.apply else [bin_path, "plan"]
         print(f"\n" + "=" * 70)
-        print(f"[*] Executing: {' '.join(tofu_cmd)}")
+        print(f"[*] Executing in {target_dir}: {' '.join(tofu_cmd)}")
         print("=" * 70 + "\n")
         
         ret = subprocess.call(tofu_cmd, cwd=target_dir)
@@ -383,9 +385,7 @@ north-south-fabric = {{
             print(f"[!] '{' '.join(tofu_cmd)}' exited with code {ret}")
             sys.exit(ret)
 
-    print(f"\n[✓] Finished! Deployment directory: {target_dir}")
-    print(f"    You can now cd into: {target_dir}")
-    print(f"    and run: {bin_path} apply")
+    print(f"\n[✓] Deployment directory ready: {target_dir}")
 
 
 if __name__ == "__main__":

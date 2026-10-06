@@ -11,3 +11,17 @@ echo "====================================================================="
 # Run the deployment and collision avoidance engine
 $PYTHON_BIN "$SCRIPT_DIR/deploy-demo-fabric.py" "$@"
 
+# Read the targeted directory created by the python script
+LAST_DEPLOY_FILE="$SCRIPT_DIR/.last_deploy_dir"
+if [ -f "$LAST_DEPLOY_FILE" ]; then
+    TARGET_DIR="$(cat "$LAST_DEPLOY_FILE")"
+    if [ -d "$TARGET_DIR" ]; then
+        echo ""
+        echo "====================================================================="
+        echo "Entering generated workspace: $TARGET_DIR"
+        echo "====================================================================="
+        cd "$TARGET_DIR"
+        exec bash -i
+    fi
+fi
+
