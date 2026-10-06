@@ -8,8 +8,8 @@ echo "====================================================================="
 echo "   Netris Spectrum-X CloudSim AI Fabric Dynamic Deployer"
 echo "====================================================================="
 
-# Run the deployment and collision avoidance engine
-$PYTHON_BIN "$SCRIPT_DIR/deploy-demo-fabric.py" "$@"
+# Run the deployment and collision avoidance engine (prepares workspace and variables)
+$PYTHON_BIN "$SCRIPT_DIR/deploy-demo-fabric.py" --no-tofu "$@"
 
 # Read the targeted directory created by the python script
 LAST_DEPLOY_FILE="$SCRIPT_DIR/.last_deploy_dir"
@@ -21,6 +21,26 @@ if [ -f "$LAST_DEPLOY_FILE" ]; then
         echo "Entering generated workspace: $TARGET_DIR"
         echo "====================================================================="
         cd "$TARGET_DIR"
+
+        # Determine binary (tofu or terraform)
+        TOFU_BIN="$(which tofu || which terraform || echo "tofu")"
+
+        echo ""
+        echo "====================================================================="
+        echo "[*] Executing in $(pwd): $TOFU_BIN init"
+        echo "====================================================================="
+        "$TOFU_BIN" init
+
+        echo ""
+        echo "====================================================================="
+        echo "[*] Executing in $(pwd): $TOFU_BIN plan"
+        echo "====================================================================="
+        "$TOFU_BIN" plan
+
+        echo ""
+        echo "====================================================================="
+        echo "[✓] Switched to $TARGET_DIR. You can now run '$TOFU_BIN apply'."
+        echo "====================================================================="
         exec bash -i
     fi
 fi
