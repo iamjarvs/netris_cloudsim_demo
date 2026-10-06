@@ -81,10 +81,13 @@ def find_free_allocation(existing_allocs, supernet_str, prefix_len):
     raise RuntimeError(f"Exhausted pool inside {supernet_str} for /{prefix_len}")
 
 
-def patch_repo_templates(dest_dir, site_name):
+def patch_repo_templates(dest_dir, site_name, leaf_asn_start, spine_asn_start):
     """
-    Ensures unique cluster template and inventory profile names across data centres.
+    Ensures unique hardware, switch, profile, and template names across data centres.
+    In Netris, all Hardware names are globally unique across the entire controller.
     """
+    pfx = site_name.lower()
+
     # 1. Server cluster template
     sct_file = os.path.join(dest_dir, "server-cluster-template.tf")
     if os.path.exists(sct_file):
@@ -92,59 +95,85 @@ def patch_repo_templates(dest_dir, site_name):
             content = f.read()
         patched = re.sub(
             r'name\s*=\s*"server-cluster-template"',
-            f'name  = "{site_name.lower()}-cluster-template"',
+            f'name  = "{pfx}-cluster-template"',
             content
         )
         with open(sct_file, "w") as f:
             f.write(patched)
 
-    # 2. East-West Inventory Profile
+    # 2. East-West Switches, Profiles, Allocations, and ASNs
     ew_file = os.path.join(dest_dir, "east-west.tf")
     if os.path.exists(ew_file):
         with open(ew_file, "r") as f:
             content = f.read()
+        # Profiles
         patched = re.sub(
-            r'resource "netris_inventory_profile" "inv-profile-1" \{\s*\n\s*name\s*=\s*"East-West"',
+            r'resource "netris_inventory_profile" "inv-profile-1" \{\s*\n\s*name\s*=\s*"[^"]+"',
             f'resource "netris_inventory_profile" "inv-profile-1" {{\n  name                            = "{site_name}-East-West"',
             content
         )
-        # Unique allocation name
+        # Allocation name
         patched = re.sub(
-            r'resource "netris_allocation" "private-ip-allocation" \{\s*\n\s*name\s*=\s*"Private IP Allocation"',
+            r'resource "netris_allocation" "private-ip-allocation" \{\s*\n\s*name\s*=\s*"[^"]+"',
             f'resource "netris_allocation" "private-ip-allocation" {{\n  name                            = "{site_name} Private IP Allocation"',
             patched
         )
+        # ASNs
+        patched = re.sub(
+            r'leaf-asn-start\s*=\s*\d+',
+            f'leaf-asn-start                  = {leaf_asn_start}',
+            patched
+        )
+        patched = re.sub(
+            r'spine-asn-start\s*=\s*\d+',
+            f'spine-asn-start                 = {spine_asn_start}',
+            patched
+        )
+        # Switch names
+        patched = re.sub(r'name\s*=\s*"leaf-pod00-', f'name                            = "{pfx}-leaf-pod00-', patched)
+        patched = re.sub(r'name\s*=\s*"spine-\$\{count\.index\}-pod00"', f'name                            = "{pfx}-spine-${{count.index}}-pod00"', patched)
         with open(ew_file, "w") as f:
             f.write(patched)
 
-    # 3. North-South Inventory Profile
+    # 3. North-South Switches, SoftGates, and Profiles
     ns_file = os.path.join(dest_dir, "north-south.tf")
     if os.path.exists(ns_file):
         with open(ns_file, "r") as f:
             content = f.read()
+        # Profile name
         patched = re.sub(
-            r'resource "netris_inventory_profile" "inv-profile-north-south" \{\s*\n\s*count\s*=\s*var\.north-south-fabric\.enable\s*\n\s*name\s*=\s*"North-South"',
+            r'resource "netris_inventory_profile" "inv-profile-north-south" \{\s*\n\s*count\s*=\s*var\.north-south-fabric\.enable\s*\n\s*name\s*=\s*"[^"]+"',
             f'resource "netris_inventory_profile" "inv-profile-north-south" {{\n  count                           = var.north-south-fabric.enable\n  name                            = "{site_name}-North-South"',
             content
         )
+        # Switch names
+        patched = re.sub(r'name\s*=\s*"ns-leaf-', f'name                            = "{pfx}-ns-leaf-', patched)
+        patched = re.sub(r'name\s*=\s*"ns-oob-leaf-', f'name                            = "{pfx}-ns-oob-leaf-', patched)
+        patched = re.sub(r'name\s*=\s*"ns-spine-', f'name                            = "{pfx}-ns-spine-', patched)
+        patched = re.sub(r'name\s*=\s*"ns-softgate-', f'name                            = "{pfx}-ns-softgate-', patched)
         with open(ns_file, "w") as f:
             f.write(patched)
 
-    # 4. Public NAT / L4LB Allocation names in bgp.tf
+    # 4. BGP Sessions, Network Interfaces, and SoftGate references
     bgp_file = os.path.join(dest_dir, "bgp.tf")
     if os.path.exists(bgp_file):
         with open(bgp_file, "r") as f:
             content = f.read()
+        # Allocation names
         patched = re.sub(
-            r'resource "netris_allocation" "public-nat-allocation" \{\s*\n\s*name\s*=\s*"Public NAT Allocation"',
+            r'resource "netris_allocation" "public-nat-allocation" \{\s*\n\s*name\s*=\s*"[^"]+"',
             f'resource "netris_allocation" "public-nat-allocation" {{\n  name                            = "{site_name} Public NAT Allocation"',
             content
         )
         patched = re.sub(
-            r'resource "netris_allocation" "public-l4lb-allocation" \{\s*\n\s*name\s*=\s*"Public L4LB Allocation"',
+            r'resource "netris_allocation" "public-l4lb-allocation" \{\s*\n\s*name\s*=\s*"[^"]+"',
             f'resource "netris_allocation" "public-l4lb-allocation" {{\n  name                            = "{site_name} Public L4LB Allocation"',
             patched
         )
+        # Network interface targeting new leaf switch name
+        patched = re.sub(r'swp51s(\d+)@ns-leaf-0', rf'swp51s\1@{pfx}-ns-leaf-0', patched)
+        # SoftGate hardware reference
+        patched = re.sub(r'hardware\s*=\s*"ns-softgate-(\d+)"', rf'hardware                        = "{pfx}-ns-softgate-\1"', patched)
         with open(bgp_file, "w") as f:
             f.write(patched)
 
@@ -236,10 +265,18 @@ def main():
     gpu_ns_gw = f"{list(gpu_ns.hosts())[-1]}/21"
     gpu_ipmi_gw = f"{list(gpu_ipmi.hosts())[-1]}/21"
 
-    # Calculate starting ASN for switches
-    asn_start = 4200300001
-    while any((asn_start + offset) in used_hw_asns for offset in range(300)):
-        asn_start += 1000
+    # Calculate distinct starting ASNs for all switch tiers
+    ew_leaf_asn = 4200100001
+    while any((ew_leaf_asn + offset) in used_hw_asns for offset in range(100)):
+        ew_leaf_asn += 1000
+
+    ew_spine_asn = 4200200001
+    while any((ew_spine_asn + offset) in used_hw_asns for offset in range(100)):
+        ew_spine_asn += 1000
+
+    ns_switch_asn = 4200300001
+    while any((ns_switch_asn + offset) in used_hw_asns for offset in range(300)):
+        ns_switch_asn += 1000
 
     print(f"\n[+] Resolved Isolated Parameters:")
     print(f"    - Site Name:        {site_name}")
@@ -253,7 +290,9 @@ def main():
     print(f"    - N-S Fabric Mgmt:  {ns_mgmt}")
     print(f"    - Workload Fabric:  {gpu_ns} (GW: {gpu_ns_gw})")
     print(f"    - Workload IPMI:    {gpu_ipmi} (GW: {gpu_ipmi_gw})")
-    print(f"    - Switch Start ASN: {asn_start}")
+    print(f"    - E-W Leaf Start ASN:  {ew_leaf_asn}")
+    print(f"    - E-W Spine Start ASN: {ew_spine_asn}")
+    print(f"    - N-S Switch Start ASN: {ns_switch_asn}")
 
     tfvars_body = f"""###################################################################################################
 #  Standard terraform.tfvars - Auto-generated for {site_name}
@@ -321,7 +360,7 @@ north-south-fabric = {{
     gpu-server-ns-nexthop           = "{gpu_ns_gw}"
     gpu-server-ipmi-subnet          = "{gpu_ipmi}"
     gpu-server-ipmi-nexthop         = "{gpu_ipmi_gw}"
-    asn-start                       = {asn_start}
+    asn-start                       = {ns_switch_asn}
 }}
 """
 
@@ -338,8 +377,8 @@ north-south-fabric = {{
     else:
         print(f"[*] Target directory already exists, refreshing files...")
 
-    # Patch server cluster template and profile names
-    patch_repo_templates(target_dir, site_name)
+    # Patch server cluster template, switch names, profile names, and ASN offsets
+    patch_repo_templates(target_dir, site_name, ew_leaf_asn, ew_spine_asn)
 
     # Standard terraform.tfvars (no -var-file needed)
     tfvars_path = os.path.join(target_dir, "terraform.tfvars")
