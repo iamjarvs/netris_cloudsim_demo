@@ -53,7 +53,6 @@ resource "netris_inventory_profile" "inv-profile-1" {
     unnumberedbgpunderlay           = true
   }
   gpuclustersettings              {
-    aggregatel3vpnprefix            = true
     asicmonitoring                  = false
     congestioncontrol               = true
     qosandroce                      = false
