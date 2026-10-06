@@ -69,10 +69,23 @@ def find_free_subnet(existing_subnets, supernet_str, prefix_len):
     raise RuntimeError(f"Exhausted pool inside {supernet_str} for /{prefix_len}")
 
 
+def find_free_allocation(existing_allocs, supernet_str, prefix_len):
+    """
+    Finds a non-overlapping IP prefix for top-level netris_allocation resources.
+    """
+    supernet = ipaddress.ip_network(supernet_str)
+    for candidate in supernet.subnets(new_prefix=prefix_len):
+        if not any(candidate.overlaps(ext) for ext in existing_allocs):
+            existing_allocs.append(candidate)
+            return candidate
+    raise RuntimeError(f"Exhausted pool inside {supernet_str} for /{prefix_len}")
+
+
 def patch_repo_templates(dest_dir, site_name):
     """
-    Ensures unique cluster template naming across data centres.
+    Ensures unique cluster template and inventory profile names across data centres.
     """
+    # 1. Server cluster template
     sct_file = os.path.join(dest_dir, "server-cluster-template.tf")
     if os.path.exists(sct_file):
         with open(sct_file, "r") as f:
@@ -83,6 +96,56 @@ def patch_repo_templates(dest_dir, site_name):
             content
         )
         with open(sct_file, "w") as f:
+            f.write(patched)
+
+    # 2. East-West Inventory Profile
+    ew_file = os.path.join(dest_dir, "east-west.tf")
+    if os.path.exists(ew_file):
+        with open(ew_file, "r") as f:
+            content = f.read()
+        patched = re.sub(
+            r'resource "netris_inventory_profile" "inv-profile-1" \{\s*\n\s*name\s*=\s*"East-West"',
+            f'resource "netris_inventory_profile" "inv-profile-1" {{\n  name                            = "{site_name}-East-West"',
+            content
+        )
+        # Unique allocation name
+        patched = re.sub(
+            r'resource "netris_allocation" "private-ip-allocation" \{\s*\n\s*name\s*=\s*"Private IP Allocation"',
+            f'resource "netris_allocation" "private-ip-allocation" {{\n  name                            = "{site_name} Private IP Allocation"',
+            patched
+        )
+        with open(ew_file, "w") as f:
+            f.write(patched)
+
+    # 3. North-South Inventory Profile
+    ns_file = os.path.join(dest_dir, "north-south.tf")
+    if os.path.exists(ns_file):
+        with open(ns_file, "r") as f:
+            content = f.read()
+        patched = re.sub(
+            r'resource "netris_inventory_profile" "inv-profile-north-south" \{\s*\n\s*count\s*=\s*var\.north-south-fabric\.enable\s*\n\s*name\s*=\s*"North-South"',
+            f'resource "netris_inventory_profile" "inv-profile-north-south" {{\n  count                           = var.north-south-fabric.enable\n  name                            = "{site_name}-North-South"',
+            content
+        )
+        with open(ns_file, "w") as f:
+            f.write(patched)
+
+    # 4. Public NAT / L4LB Allocation names in bgp.tf
+    bgp_file = os.path.join(dest_dir, "bgp.tf")
+    if os.path.exists(bgp_file):
+        with open(bgp_file, "r") as f:
+            content = f.read()
+        patched = re.sub(
+            r'resource "netris_allocation" "public-nat-allocation" \{\s*\n\s*name\s*=\s*"Public NAT Allocation"',
+            f'resource "netris_allocation" "public-nat-allocation" {{\n  name                            = "{site_name} Public NAT Allocation"',
+            content
+        )
+        patched = re.sub(
+            r'resource "netris_allocation" "public-l4lb-allocation" \{\s*\n\s*name\s*=\s*"Public L4LB Allocation"',
+            f'resource "netris_allocation" "public-l4lb-allocation" {{\n  name                            = "{site_name} Public L4LB Allocation"',
+            patched
+        )
+        with open(bgp_file, "w") as f:
             f.write(patched)
 
 
@@ -125,7 +188,18 @@ def main():
     site_name = args.site_name or f"Datacenter-{letter}"
     site_asn = max(existing_site_asns or [655000]) + 1
 
-    # 2. Fetch existing IPAM Subnets
+    # 2. Fetch existing Allocations
+    allocs_res = api_get(args.url, "/api/v2/ipam", cookie).get("data", [])
+    existing_allocs = []
+    for item in allocs_res:
+        p = item.get("prefix")
+        if p:
+            try:
+                existing_allocs.append(ipaddress.ip_network(p))
+            except ValueError:
+                pass
+
+    # 3. Fetch existing Subnets
     subnets_res = api_get(args.url, "/api/v2/ipam/subnets", cookie).get("data", [])
     existing_subnets = []
     for item in subnets_res:
@@ -136,15 +210,25 @@ def main():
             except ValueError:
                 pass
 
-    # 3. Fetch existing HW ASNs
+    # 4. Fetch existing HW ASNs
     hw_res = api_get(args.url, "/api/v2/hw", cookie).get("data", [])
     used_hw_asns = {h.get("asn") for h in hw_res if h.get("asn")}
 
-    # Calculate collision-free subnets
-    oob_mgmt = find_free_subnet(existing_subnets, "10.0.0.0/8", 18)
-    switch_lo = find_free_subnet(existing_subnets, "10.0.0.0/8", 24)
+    # Calculate collision-free top-level allocations
+    private_alloc = find_free_allocation(existing_allocs, "172.18.0.0/15", 16)
+    nat_alloc = find_free_allocation(existing_allocs, "100.64.0.0/10", 30)
+    l4lb_alloc = find_free_allocation(existing_allocs, "100.64.0.0/10", 30)
+
+    # Calculate subnets inside private_alloc
+    # Subnets inside private_alloc:
+    oob_mgmt = find_free_subnet(existing_subnets, str(private_alloc), 18)
+    switch_lo = find_free_subnet(existing_subnets, str(private_alloc), 24)
+
+    # North-South subnets (can be /16 from 10.0.0.0/8 or remaining space)
     ns_lo = find_free_subnet(existing_subnets, "10.0.0.0/8", 16)
     ns_mgmt = find_free_subnet(existing_subnets, "10.0.0.0/8", 16)
+
+    # GPU server workload subnets (/21 inside 192.168.0.0/16)
     gpu_ns = find_free_subnet(existing_subnets, "192.168.0.0/16", 21)
     gpu_ipmi = find_free_subnet(existing_subnets, "192.168.0.0/16", 21)
 
@@ -161,6 +245,9 @@ def main():
     print(f"\n[+] Resolved Isolated Parameters:")
     print(f"    - Site Name:        {site_name}")
     print(f"    - Site Public ASN:  {site_asn}")
+    print(f"    - Private Alloc:    {private_alloc}")
+    print(f"    - NAT Pool Alloc:   {nat_alloc}")
+    print(f"    - L4LB Pool Alloc:  {l4lb_alloc}")
     print(f"    - OOB Management:   {oob_mgmt} (GW: {oob_gw})")
     print(f"    - Switch Loopbacks: {switch_lo}")
     print(f"    - N-S Fabric Lo:    {ns_lo}")
@@ -188,8 +275,14 @@ site = {{
     vlanrangeautoassign             = "2-3999"
 }}
 
+pnap_ipam_public = {{
+    default_route                   = "0.0.0.0/0"
+    netris_cloudsim_nat_cidr        = "{nat_alloc}"
+    netris_cloudsim_l4lb_cidr       = "{l4lb_alloc}"
+}}
+
 ipam = {{
-    private-allocation              = "10.0.0.0/8"
+    private-allocation              = "{private_alloc}"
     mgmt                            = "{oob_mgmt}"
     mgmt-gateway                    = "{oob_gw}"
     switch-loopback                 = "{switch_lo}"
@@ -246,7 +339,7 @@ north-south-fabric = {{
     else:
         print(f"[*] Target directory already exists, refreshing files...")
 
-    # Patch server cluster template
+    # Patch server cluster template and profile names
     patch_repo_templates(target_dir, site_name)
 
     # Standard terraform.tfvars (no -var-file needed)
@@ -258,6 +351,11 @@ north-south-fabric = {{
     demo_vars_path = os.path.join(target_dir, "demo-AI-fabric.tfvars")
     with open(demo_vars_path, "w") as f:
         f.write(tfvars_body)
+
+    # Clear terraform.auto.tfvars so it doesn't override our dynamic pnap_ipam_public
+    auto_vars_path = os.path.join(target_dir, "terraform.auto.tfvars")
+    if os.path.exists(auto_vars_path):
+        os.remove(auto_vars_path)
 
     print(f"[✓] Written standard variable file: {tfvars_path}")
     print(f"[✓] Written demo-AI-fabric.tfvars:   {demo_vars_path}")
@@ -286,6 +384,8 @@ north-south-fabric = {{
             sys.exit(ret)
 
     print(f"\n[✓] Finished! Deployment directory: {target_dir}")
+    print(f"    You can now cd into: {target_dir}")
+    print(f"    and run: {bin_path} apply")
 
 
 if __name__ == "__main__":
